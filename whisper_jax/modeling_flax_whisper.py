@@ -1598,6 +1598,7 @@ class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):
         forced_decoder_ids,
         return_timestamps=False,
         generation_config=None,
+        return_acc=False,
         **kwargs,
     ):
         if generation_config is None:
@@ -1656,6 +1657,24 @@ class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):
         model_kwargs["decoder_position_ids"] = model_kwargs["decoder_position_ids"][:, -1:] + 1
         return model_kwargs
 
+    def compute_log_probs(self, input_features, decoder_input_ids, decoder_attention_mask=None, decoder_position_ids=None):
+        outputs = self(
+            input_features=input_features,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
+            decoder_position_ids=decoder_position_ids,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        logits = outputs.logits
+        log_probs = jax.nn.log_softmax(logits, axis=-1)
+        return log_probs
+
+    def compute_avg_log_probs(self, input_features, decoder_input_ids, decoder_attention_mask=None, decoder_position_ids=None):
+        log_probs = self.compute_log_probs(input_features, decoder_input_ids, decoder_attention_mask, decoder_position_ids)
+        avg_log_probs = float(jnp.mean(log_probs, axis=(1, 2)).item())
+        return avg_log_probs
 
 FLAX_WHISPER_CONDITIONAL_GENERATION_DOCSTRING = r"""
     Returns:

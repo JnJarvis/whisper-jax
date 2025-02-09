@@ -85,12 +85,14 @@ class FlaxWhisperPipline:
         tokenizer_cls = WhisperTokenizerFast if is_tokenizers_available() else WhisperTokenizer
         self.tokenizer = tokenizer_cls.from_pretrained(checkpoint)
 
-        self.model, self.params = FlaxWhisperForConditionalGeneration.from_pretrained(
+        ubba = FlaxWhisperForConditionalGeneration.from_pretrained(
             self.checkpoint,
-            _do_init=False,
+            # _do_init=False,
             dtype=self.dtype,
         )
-
+        
+        self.model = ubba
+        self.params = ubba.params
         self.max_length = max_length if max_length is not None else self.model.generation_config.max_length
         self.min_batch_size = jax.local_device_count()
         self.batch_size = (
@@ -181,7 +183,7 @@ class FlaxWhisperPipline:
             static_argnums=(3,),
         )
 
-    def generate(self, input_features, language=None, task=None, return_timestamps=False):
+    def generate(self, input_features, language=None, task=None, return_timestamps=False, return_avg_log_probs=False):
         forced_decoder_ids = self.get_forced_decoder_ids(
             language=language, task=task, return_timestamps=return_timestamps
         )
@@ -196,7 +198,12 @@ class FlaxWhisperPipline:
             output_ids = self.p_generate(
                 freeze(self.params), input_features, forced_decoder_ids, return_timestamps
             ).sequences
-        return output_ids
+
+        if return_avg_log_probs:
+            avg_log_probs = self.model.compute_avg_log_probs(input_features, output_ids)
+            return output_ids, avg_log_probs
+        else:
+            return output_ids
 
     def get_forced_decoder_ids(self, generation_config=None, task=None, language=None, return_timestamps=False):
         if generation_config is None:
@@ -397,7 +404,7 @@ class FlaxWhisperPipline:
         )
         return {"text": text, **optional}
 
-    def forward(self, model_inputs, batch_size=None, language=None, task=None, return_timestamps=False):
+    def forward(self, model_inputs, batch_size=None, language=None, task=None, return_timestamps=False, return_avg_log_probs=False):
         # We need to keep track of some additional input arguments for post-processing so need to forward these on after running generation
         input_features = model_inputs.pop("input_features")
         input_batch_size = input_features.shape[0]
@@ -406,12 +413,17 @@ class FlaxWhisperPipline:
             padding = np.zeros([batch_size - input_batch_size, *input_features.shape[1:]], input_features.dtype)
             input_features = np.concatenate([input_features, padding])
 
-        pred_ids = self.generate(input_features, language=language, task=task, return_timestamps=return_timestamps)[
-            :input_batch_size
-        ]
+        if return_avg_log_probs:
+            pred_ids, avg_log_probs = self.generate(input_features, language=language, task=task, return_timestamps=return_timestamps, return_avg_log_probs=return_avg_log_probs)
+            avg_log_probs = [avg_log_probs]
+        else:
+            pred_ids = self.generate(input_features, language=language, task=task, return_timestamps=return_timestamps)
 
-        # tokenizer's decode method expects an extra dim - we insert it here for convenience
+        pred_ids = pred_ids[:input_batch_size]
         out = {"tokens": pred_ids[:, None, :]}
+
+        if return_avg_log_probs:
+            out["avg_log_probs"] = avg_log_probs
 
         stride = model_inputs.pop("stride", None)
         if stride is not None:
@@ -428,6 +440,7 @@ class FlaxWhisperPipline:
         language=None,
         task=None,
         return_timestamps=None,
+        return_avg_log_probs=False,
         generate_kwargs=None,
     ):
         """
@@ -475,6 +488,9 @@ class FlaxWhisperPipline:
                 Whether to return timestamps in the prediction. Defaults to False. If set to true, the pipeline
                 will return two keys in the output dictionary: `"text"` containing the text transcription, and `"chunks"`
                 containing the transcription segments chunked by their utterance-level timestamps.
+            return_avg_log_probs (*optional*, `bool`):
+                Whether to return average log probabilities in the prediction. Defaults to False. If set to true, the pipeline
+                will return an additional key in the output dictionary: `"avg_log_probs"` containing the average log probabilities.
 
         Return:
             `Dict`: A dictionary with the following keys:
@@ -484,6 +500,9 @@ class FlaxWhisperPipline:
                     chunks identified by the model, *e.g.* `[{"text": "hi ", "timestamps": (0.5,0.9), {"text":
                     "there", "timestamps": (1.0, 1.5)}]`. The original full text can roughly be recovered by doing
                     `"".join(chunk["text"] for chunk in output["chunks"])`.
+                - **avg_log_probs** (*optional*, `List[float]`)
+                    When using `return_avg_log_probs`, the `avg_log_probs` will become a list containing the average log probabilities
+                    for each chunk.
         """
         batch_size = batch_size if batch_size is not None else self.batch_size
         if batch_size % self.min_batch_size != 0:
@@ -499,8 +518,11 @@ class FlaxWhisperPipline:
         for batch in dataloader:
             model_outputs.append(
                 self.forward(
-                    batch, batch_size=batch_size, language=language, task=task, return_timestamps=return_timestamps
+                    batch, batch_size=batch_size, language=language, task=task, return_timestamps=return_timestamps, return_avg_log_probs=return_avg_log_probs
                 )
             )
         post_processed = self.postprocess(model_outputs, return_timestamps=return_timestamps)
+        if return_avg_log_probs:
+            avg_log_probs = [output["avg_log_probs"] for output in model_outputs]
+            post_processed["avg_log_probs"] = avg_log_probs[0][0]
         return post_processed
