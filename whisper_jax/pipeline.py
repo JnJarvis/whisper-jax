@@ -111,9 +111,13 @@ class FlaxWhisperPipline:
 
         # use pmap for DP by default - this is compatible on a Colab TPU v2
         self.params = jax_utils.replicate(self.params)
-        self.p_generate = jax.pmap(
-            generate, "input_features", in_axes=(0, 0, None), out_axes=0, static_broadcasted_argnums=(3,)
-        )
+        # devices = jax.devices()
+        # to use 1 GPU
+        devices = jax.devices()[0]
+        
+         self.p_generate = jax.pmap( 
+             generate, "input_features", in_axes=(0, 0, None), out_axes=0, static_broadcasted_argnums=(3,), devices= devices
+         )
         self.is_sharded = False
 
     def shard_params(self, num_mp_partitions=1, logical_axis_rules=logical_axis_rules_dp):
